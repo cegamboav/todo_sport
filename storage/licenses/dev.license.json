@@ -1,0 +1,14 @@
+{
+  "license_id": "ts-lic-dev-00001",
+  "organization": "Todo Sport (desarrollo)",
+  "license_type": "annual",
+  "edition": "standard",
+  "issued_at": "2026-05-23",
+  "expires_at": "2027-05-23",
+  "grace_days": 14,
+  "max_rings": 10,
+  "max_events_per_year": null,
+  "features": ["combat", "forms", "advanced_reports"],
+  "hardware_hint": null,
+  "issuer": "todo-sport-licensing-v1"
+}

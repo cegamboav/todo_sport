@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "jsx": "preserve",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "lib": ["ESNext", "DOM"],
+    "skipLibCheck": true,
+    "noEmit": true,
+    "paths": {
+      "@/*": ["./resources/js/*"],
+      "@shared/*": ["./resources/js/shared/*"],
+      "@layouts/*": ["./resources/js/layouts/*"],
+      "@domains/*": ["./resources/js/domains/*"]
+    },
+    "types": ["vite/client"]
+  },
+  "include": ["resources/js/**/*.ts", "resources/js/**/*.vue", "resources/js/**/*.d.ts"]
+}

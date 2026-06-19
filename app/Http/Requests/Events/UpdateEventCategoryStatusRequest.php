@@ -20,6 +20,7 @@ class UpdateEventCategoryStatusRequest extends FormRequest
     {
         return [
             'status' => ['required', Rule::enum(EventCategoryStatus::class)],
+            'confirmed' => ['sometimes', 'boolean'],
         ];
     }
 }

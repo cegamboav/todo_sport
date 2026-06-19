@@ -11,6 +11,7 @@ class CategoryCompetitor extends Model
         'event_category_id',
         'event_competitor_id',
         'sort_order',
+        'admin_override',
     ];
 
     /**
@@ -20,6 +21,7 @@ class CategoryCompetitor extends Model
     {
         return [
             'sort_order' => 'integer',
+            'admin_override' => 'boolean',
         ];
     }
 

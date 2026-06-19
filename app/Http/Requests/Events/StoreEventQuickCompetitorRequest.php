@@ -22,8 +22,10 @@ class StoreEventQuickCompetitorRequest extends FormRequest
             'first_name' => ['required', 'string', 'max:80'],
             'last_name' => ['required', 'string', 'max:80'],
             'school_id' => ['required', 'integer', 'exists:schools,id'],
-            'gender' => ['nullable', Rule::enum(Gender::class)],
+            'gender' => ['required', Rule::enum(Gender::class)],
             'birth_date' => ['nullable', 'date', 'before:today'],
+            'weight_kg' => ['required', 'numeric', 'min:0', 'max:999.99'],
+            'height_cm' => ['required', 'integer', 'min:0', 'max:300'],
             'grade_id' => ['nullable', 'integer', 'exists:grades,id'],
         ];
     }

@@ -5,7 +5,6 @@ namespace App\Http\Requests\Events;
 use App\Enums\CategoryGenderScope;
 use App\Models\Event;
 use App\Models\EventModality;
-use App\Models\Ring;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Validator;
@@ -58,23 +57,12 @@ class StoreEventCategoryRequest extends FormRequest
             }
 
             $ringId = $this->input('ring_id');
-            if ($isCreate && ($ringId !== null && $ringId !== '')) {
-                $validator->errors()->add('ring_id', 'Ring se asigna después, cuando la categoría esté lista.');
+            if ($ringId !== null && $ringId !== '') {
+                $validator->errors()->add('ring_id', 'Ring se asigna desde otro workspace.');
             }
 
             if ($isCreate && ($this->input('competition_order') !== null && $this->input('competition_order') !== '')) {
                 $validator->errors()->add('competition_order', 'El orden de competencia se define después.');
-            }
-
-            if ($ringId !== null && $ringId !== '') {
-                $validRing = Ring::query()
-                    ->where('event_id', $event->id)
-                    ->whereKey((int) $ringId)
-                    ->exists();
-
-                if (! $validRing) {
-                    $validator->errors()->add('ring_id', 'Ring inválido para este evento.');
-                }
             }
         });
     }

@@ -34,6 +34,8 @@ const form = useForm({
   school_id: '' as string | number,
   gender: '',
   birth_date: '',
+  weight_kg: '' as string | number,
+  height_cm: '' as string | number,
   grade_id: '' as string | number,
 });
 
@@ -79,6 +81,25 @@ function submit() {
           <option v-for="opt in schoolOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
         </select>
         <p v-if="form.errors.school_id" class="form-error">{{ form.errors.school_id }}</p>
+      </div>
+      <div class="form-group">
+        <label>Sexo *</label>
+        <select v-model="form.gender" class="form-input" required>
+          <option value="">Seleccionar…</option>
+          <option value="male">Masculino</option>
+          <option value="female">Femenino</option>
+        </select>
+        <p v-if="form.errors.gender" class="form-error">{{ form.errors.gender }}</p>
+      </div>
+      <div class="form-group">
+        <label>Peso (kg) *</label>
+        <input v-model="form.weight_kg" type="number" min="0" step="0.01" class="form-input" required />
+        <p v-if="form.errors.weight_kg" class="form-error">{{ form.errors.weight_kg }}</p>
+      </div>
+      <div class="form-group">
+        <label>Estatura (cm) *</label>
+        <input v-model="form.height_cm" type="number" min="0" step="1" class="form-input" required />
+        <p v-if="form.errors.height_cm" class="form-error">{{ form.errors.height_cm }}</p>
       </div>
       <div class="form-group">
         <label>Grado</label>

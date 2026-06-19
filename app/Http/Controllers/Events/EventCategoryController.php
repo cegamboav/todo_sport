@@ -2,8 +2,10 @@
 
 namespace App\Http\Controllers\Events;
 
+use App\Enums\EventCategoryStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Events\AssignCategoryCompetitorRequest;
+use App\Http\Requests\Events\GenerateCategoryBracketRequest;
 use App\Http\Requests\Events\StoreCategoryMatchRequest;
 use App\Http\Requests\Events\StoreEventCategoryRequest;
 use App\Http\Requests\Events\SyncCategoryMatchesRequest;
@@ -14,6 +16,7 @@ use App\Models\CategoryMatch;
 use App\Models\Event;
 use App\Models\EventCategory;
 use App\Models\EventCompetitor;
+use App\Services\Competitive\BracketService;
 use App\Services\Competitive\EventCategoryService;
 use App\Support\Events\EventWorkspacePresenter;
 use Illuminate\Http\RedirectResponse;
@@ -93,8 +96,9 @@ class EventCategoryController extends Controller
         try {
             $categories->updateStatus(
                 $category,
-                $request->enum('status', \App\Enums\EventCategoryStatus::class),
+                $request->enum('status', EventCategoryStatus::class),
                 $request->user(),
+                $request->boolean('confirmed'),
             );
         } catch (ValidationException $exception) {
             return back()->withErrors($exception->errors());
@@ -147,7 +151,12 @@ class EventCategoryController extends Controller
         $participant = EventCompetitor::query()->findOrFail($request->integer('event_competitor_id'));
 
         try {
-            $categories->assignCompetitor($category, $participant, $request->user());
+            $categories->assignCompetitor(
+                $category,
+                $participant,
+                $request->user(),
+                $request->boolean('admin_override'),
+            );
         } catch (ValidationException $exception) {
             return back()->withErrors($exception->errors());
         }
@@ -234,6 +243,50 @@ class EventCategoryController extends Controller
             return back()->withErrors($exception->errors());
         }
 
-        return back()->with('success', 'Llave manual guardada.');
+        return back()->with('success', 'Llave actualizada.');
+    }
+
+    public function generateBracketAuto(
+        GenerateCategoryBracketRequest $request,
+        Event $event,
+        EventCategory $category,
+        BracketService $brackets,
+    ): RedirectResponse {
+        $this->authorize('update', $event);
+        abort_unless($category->event_id === $event->id, 404);
+
+        try {
+            $brackets->generateAutomatic(
+                $category,
+                $request->user(),
+                $request->boolean('confirmed'),
+            );
+        } catch (ValidationException $exception) {
+            return back()->withErrors($exception->errors());
+        }
+
+        return back()->with('success', 'Llave generada automáticamente.');
+    }
+
+    public function generateBracketManual(
+        GenerateCategoryBracketRequest $request,
+        Event $event,
+        EventCategory $category,
+        BracketService $brackets,
+    ): RedirectResponse {
+        $this->authorize('update', $event);
+        abort_unless($category->event_id === $event->id, 404);
+
+        try {
+            $brackets->generateManual(
+                $category,
+                $request->user(),
+                $request->boolean('confirmed'),
+            );
+        } catch (ValidationException $exception) {
+            return back()->withErrors($exception->errors());
+        }
+
+        return back()->with('success', 'Estructura de llave creada (manual).');
     }
 }

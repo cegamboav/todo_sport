@@ -4,22 +4,21 @@ use App\Http\Controllers\Admin\LicenseController;
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\Auth\LogoutController;
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\Events\EventCategoryController;
+use App\Http\Controllers\Events\EventComboController;
+use App\Http\Controllers\Events\EventController;
+use App\Http\Controllers\Events\EventModalityController;
+use App\Http\Controllers\Events\EventOperationsController;
+use App\Http\Controllers\Events\EventParticipantController;
+use App\Http\Controllers\Events\EventSearchController;
+use App\Http\Controllers\Events\EventSettingController;
+use App\Http\Controllers\Events\EventStaffController;
+use App\Http\Controllers\Events\EventWorkspaceController;
+use App\Http\Controllers\Events\ModalityController;
 use App\Http\Controllers\Judge\HomeController as JudgeHomeController;
 use App\Http\Controllers\Masters\CompetitorController;
 use App\Http\Controllers\Masters\ProfessorController;
 use App\Http\Controllers\Masters\RefereeController;
-use App\Http\Controllers\Events\EventCategoryController;
-use App\Http\Controllers\Events\EventComboController;
-use App\Http\Controllers\Events\EventController;
-use App\Models\Event;
-use App\Http\Controllers\Events\EventWorkspaceController;
-use App\Http\Controllers\Events\EventModalityController;
-use App\Http\Controllers\Events\EventParticipantController;
-use App\Http\Controllers\Events\EventSettingController;
-use App\Http\Controllers\Events\EventOperationsController;
-use App\Http\Controllers\Events\EventSearchController;
-use App\Http\Controllers\Events\EventStaffController;
-use App\Http\Controllers\Events\ModalityController;
 use App\Http\Controllers\Masters\SchoolController;
 use App\Http\Controllers\Professor\HomeController as ProfessorHomeController;
 use App\Http\Controllers\Rings\HomeController as RingsHomeController;
@@ -123,6 +122,10 @@ Route::middleware(['auth', 'active'])->group(function () {
             ->name('categories.matches.store');
         Route::put('{event}/categories/{category}/matches', [EventCategoryController::class, 'syncMatches'])
             ->name('categories.matches.sync');
+        Route::post('{event}/categories/{category}/bracket/generate-auto', [EventCategoryController::class, 'generateBracketAuto'])
+            ->name('categories.bracket.generate-auto');
+        Route::post('{event}/categories/{category}/bracket/generate-manual', [EventCategoryController::class, 'generateBracketManual'])
+            ->name('categories.bracket.generate-manual');
         Route::delete('{event}/categories/{category}/matches/{match}', [EventCategoryController::class, 'destroyMatch'])
             ->name('categories.matches.destroy');
         Route::post('{event}/participants/{participant}/items', [EventParticipantController::class, 'storeRegistrationItem'])

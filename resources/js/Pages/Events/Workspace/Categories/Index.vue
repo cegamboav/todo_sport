@@ -3,6 +3,7 @@ import { Link, router, useForm, usePage } from '@inertiajs/vue3';
 import { computed, ref } from 'vue';
 import EventWorkspaceLayout from '@layouts/EventWorkspaceLayout.vue';
 import { useEventWorkspacePage } from '@shared/composables/useEventWorkspacePage';
+import { formatWeightKg } from '@shared/utils/formatWeight';
 
 defineOptions({ layout: EventWorkspaceLayout });
 
@@ -36,6 +37,29 @@ interface CategoryRow {
   reference_weight?: string | null;
 }
 
+interface ModalityChip {
+  modality_id: number;
+  name: string;
+}
+
+interface AssignedModalityChip extends ModalityChip {
+  category_name: string;
+}
+
+interface PendingCategorizationRow {
+  event_competitor_id: number;
+  competitor: { first_name: string; last_name: string; school?: string | null };
+  enrolled_modalities: ModalityChip[];
+  assigned_modalities: AssignedModalityChip[];
+  pending_modalities: ModalityChip[];
+}
+
+interface PendingCategorization {
+  total_with_pending: number;
+  summary_by_modality: Array<{ modality_id: number; name: string; count: number }>;
+  participants: PendingCategorizationRow[];
+}
+
 const { event, canManage } = useEventWorkspacePage();
 
 const page = usePage<{
@@ -44,18 +68,28 @@ const page = usePage<{
   categoryStatusOptions: { value: string; label: string }[];
   categoryGenderOptions: { value: string; label: string }[];
   categoryMetrics: { total: number; without_ring: number; draft: number; bracket_pending: number };
+  pendingCategorization: PendingCategorization;
 }>();
 
 const categories = computed(() => page.props.categories);
 const rings = computed(() => page.props.rings);
 const metrics = computed(() => page.props.categoryMetrics);
+const pendingCategorization = computed(() => page.props.pendingCategorization);
 const statusOptions = computed(() => page.props.categoryStatusOptions);
 const genderOptions = computed(() => page.props.categoryGenderOptions);
 
 const listSearch = ref('');
+const pendingSearch = ref('');
+const showPendingPanel = ref(true);
 const showCreate = ref(false);
 const previewCategoryId = ref<number | null>(null);
 const previewTimer = ref<ReturnType<typeof setTimeout> | null>(null);
+const previewCloseTimer = ref<ReturnType<typeof setTimeout> | null>(null);
+const previewPosition = ref<{ top: number; left: number } | null>(null);
+
+const previewCategory = computed(() =>
+  categories.value.find((c) => c.id === previewCategoryId.value) ?? null,
+);
 
 const createForm = useForm({
   name: '',
@@ -90,6 +124,29 @@ const filteredCategories = computed(() => {
     );
   });
 });
+
+const filteredPendingParticipants = computed(() => {
+  const q = pendingSearch.value.trim().toLowerCase();
+  const rows = pendingCategorization.value.participants;
+
+  if (!q) {
+    return rows;
+  }
+
+  return rows.filter((row) => {
+    const name = `${row.competitor.first_name} ${row.competitor.last_name}`.toLowerCase();
+    const school = row.competitor.school?.toLowerCase() ?? '';
+    const enrolled = row.enrolled_modalities.map((m) => m.name).join(' ').toLowerCase();
+    const assigned = row.assigned_modalities.map((m) => m.name).join(' ').toLowerCase();
+    const pending = row.pending_modalities.map((m) => m.name).join(' ').toLowerCase();
+
+    return name.includes(q) || school.includes(q) || enrolled.includes(q) || assigned.includes(q) || pending.includes(q);
+  });
+});
+
+function participantName(row: PendingCategorizationRow) {
+  return `${row.competitor.first_name} ${row.competitor.last_name}`;
+}
 
 function statusLabel(status: string) {
   return statusOptions.value.find((o) => o.value === status)?.label ?? status;
@@ -148,15 +205,41 @@ function competitorMeta(row: CategoryRow['category_competitors'][number]) {
   const school = c.school?.abbreviation || c.school?.name || '—';
   const grade = c.grade?.name || '—';
   const gender = c.gender === 'male' ? 'M' : 'F';
-  const weight = c.weight_kg ? `${c.weight_kg}kg` : 's/p';
+  const weight = formatWeightKg(c.weight_kg)?.replace(' kg', 'kg') ?? 's/p';
   return `${school} · ${grade} · ${gender} · ${weight}`;
 }
 
-function openPreviewWithDelay(categoryId: number) {
-  closePreview();
+function openPreviewWithDelay(categoryId: number, event: MouseEvent) {
+  cancelClosePreview();
+  if (previewTimer.value) {
+    clearTimeout(previewTimer.value);
+  }
+  const target = event.currentTarget as HTMLElement | null;
+  if (target) {
+    const rect = target.getBoundingClientRect();
+    previewPosition.value = {
+      top: rect.bottom + 8,
+      left: Math.max(12, rect.left - 120),
+    };
+  }
   previewTimer.value = setTimeout(() => {
     previewCategoryId.value = categoryId;
   }, 220);
+}
+
+function scheduleClosePreview() {
+  cancelClosePreview();
+  previewCloseTimer.value = setTimeout(() => {
+    previewCategoryId.value = null;
+    previewPosition.value = null;
+  }, 180);
+}
+
+function cancelClosePreview() {
+  if (previewCloseTimer.value) {
+    clearTimeout(previewCloseTimer.value);
+    previewCloseTimer.value = null;
+  }
 }
 
 function closePreview() {
@@ -164,7 +247,9 @@ function closePreview() {
     clearTimeout(previewTimer.value);
     previewTimer.value = null;
   }
+  cancelClosePreview();
   previewCategoryId.value = null;
+  previewPosition.value = null;
 }
 </script>
 
@@ -198,7 +283,122 @@ function closePreview() {
           <span class="metric-label">Llave pendiente</span>
           <strong class="metric-value">{{ metrics.bracket_pending }}</strong>
         </div>
+        <button
+          type="button"
+          class="metric-tile metric-tile--highlight metric-tile--clickable"
+          :class="{ 'metric-tile--disabled': pendingCategorization.total_with_pending === 0 }"
+          :disabled="pendingCategorization.total_with_pending === 0"
+          @click="showPendingPanel = true"
+        >
+          <span class="metric-label">Pendientes categorizar</span>
+          <strong class="metric-value">{{ pendingCategorization.total_with_pending }}</strong>
+          <span v-if="pendingCategorization.total_with_pending > 0" class="metric-action">Ver panel →</span>
+        </button>
       </div>
+    </section>
+
+    <section v-if="pendingCategorization.total_with_pending > 0" class="card card-body pending-categorization-card">
+      <div class="page-header pending-panel-header">
+        <div>
+          <h3 class="subsection-title">Participantes pendientes de categorizar</h3>
+          <p class="hint">
+            Modalidades inscritas menos modalidades ya asignadas a categorías.
+            Incluye cobertura por combo.
+          </p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-sm" @click="showPendingPanel = !showPendingPanel">
+          {{ showPendingPanel ? 'Ocultar' : 'Mostrar' }}
+        </button>
+      </div>
+
+      <template v-if="showPendingPanel">
+        <div v-if="pendingCategorization.summary_by_modality.length > 0" class="pending-summary">
+          <span class="pending-summary-label">Pendientes por modalidad</span>
+          <div class="pending-summary-chips">
+            <span
+              v-for="item in pendingCategorization.summary_by_modality"
+              :key="item.modality_id"
+              class="pending-summary-chip"
+            >
+              {{ item.name }}: <strong>{{ item.count }}</strong>
+            </span>
+          </div>
+        </div>
+
+        <div class="ops-search-bar pending-search-bar">
+          <label class="ops-search-label" for="pending-categorization-search">Buscar participante</label>
+          <div class="ops-search-wrap" :class="{ 'ops-search-wrap--active': pendingSearch.trim().length > 0 }">
+            <svg class="ops-search-icon" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <path d="M9 3.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11Z" stroke="currentColor" stroke-width="1.75" />
+              <path d="M13.5 13.5 17 17" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" />
+            </svg>
+            <input
+              id="pending-categorization-search"
+              v-model="pendingSearch"
+              type="search"
+              class="ops-search-input"
+              placeholder="Nombre, escuela, modalidad…"
+            />
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="data-table pending-table">
+            <thead>
+              <tr>
+                <th>Competidor</th>
+                <th>Inscrito</th>
+                <th>Asignado</th>
+                <th>Pendiente</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in filteredPendingParticipants" :key="row.event_competitor_id">
+                <td class="cell-primary">
+                  <strong>{{ participantName(row) }}</strong>
+                  <span v-if="row.competitor.school" class="pending-school">{{ row.competitor.school }}</span>
+                </td>
+                <td>
+                  <span
+                    v-for="modality in row.enrolled_modalities"
+                    :key="`enrolled-${row.event_competitor_id}-${modality.modality_id}`"
+                    class="modality-chip modality-chip--enrolled"
+                  >
+                    {{ modality.name }}
+                  </span>
+                </td>
+                <td>
+                  <template v-if="row.assigned_modalities.length > 0">
+                    <span
+                      v-for="modality in row.assigned_modalities"
+                      :key="`assigned-${row.event_competitor_id}-${modality.modality_id}`"
+                      class="modality-chip modality-chip--assigned"
+                      :title="modality.category_name"
+                    >
+                      {{ modality.name }}
+                    </span>
+                  </template>
+                  <span v-else class="hint">—</span>
+                </td>
+                <td>
+                  <span
+                    v-for="modality in row.pending_modalities"
+                    :key="`pending-${row.event_competitor_id}-${modality.modality_id}`"
+                    class="modality-chip modality-chip--pending"
+                  >
+                    {{ modality.name }}
+                  </span>
+                </td>
+              </tr>
+              <tr v-if="filteredPendingParticipants.length === 0">
+                <td colspan="4" class="hint table-empty">
+                  {{ pendingSearch.trim() ? 'Sin coincidencias.' : 'Todos los participantes están categorizados.' }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </template>
     </section>
 
     <section v-if="showCreate && canManage" class="card card-body">
@@ -263,7 +463,7 @@ function closePreview() {
             v-model="listSearch"
             type="search"
             class="ops-search-input"
-            placeholder="Código, nombre, modalidad, ring, estado…"
+            placeholder="Nombre, modalidad, ring, estado…"
           />
         </div>
       </div>
@@ -273,7 +473,6 @@ function closePreview() {
           <thead>
             <tr>
               <th>Orden</th>
-              <th>Código</th>
               <th>Categoría</th>
               <th>Modalidad</th>
               <th>Ring</th>
@@ -294,40 +493,29 @@ function closePreview() {
                 />
                 <span v-else>{{ c.competition_order }}</span>
               </td>
-              <td class="cell-code">{{ c.internal_code }}</td>
               <td class="cell-primary">
                 <Link :href="`/events/${event.id}/categories/${c.id}`" class="cell-link">{{ c.name }}</Link>
               </td>
               <td>{{ c.modality.name }}</td>
               <td>{{ c.ring?.name ?? '—' }}</td>
-              <td>{{ c.category_competitors_count }}</td>
-              <td><span :class="statusClass(c.status)">{{ statusLabel(c.status) }}</span></td>
-              <td class="cell-actions">
-                <div
-                  class="preview-wrap"
-                  @mouseenter="openPreviewWithDelay(c.id)"
-                  @mouseleave="closePreview"
-                >
-                  <button type="button" class="btn btn-ghost btn-sm" aria-label="Preview inscritos">
-                    👁
-                  </button>
-                  <div v-if="previewCategoryId === c.id" class="category-preview">
-                    <p class="preview-title">{{ c.category_competitors_count }} inscritos</p>
-                    <ul class="preview-list">
-                      <li v-for="row in c.category_competitors.slice(0, 8)" :key="row.id">
-                        <strong>
-                          {{ row.event_competitor.competitor.first_name }}
-                          {{ row.event_competitor.competitor.last_name }}
-                        </strong>
-                        <span class="preview-meta">{{ competitorMeta(row) }}</span>
-                      </li>
-                      <li v-if="c.category_competitors.length === 0" class="hint">Sin inscritos aún.</li>
-                      <li v-else-if="c.category_competitors.length > 8" class="hint">
-                        +{{ c.category_competitors.length - 8 }} más
-                      </li>
-                    </ul>
+              <td>
+                <div class="competitors-cell">
+                  <span class="competitors-count" title="Participantes inscritos">
+                    👥 {{ c.category_competitors_count }}
+                  </span>
+                  <div
+                    class="preview-wrap"
+                    @mouseenter="openPreviewWithDelay(c.id, $event)"
+                    @mouseleave="scheduleClosePreview"
+                  >
+                    <button type="button" class="btn btn-ghost btn-sm btn-icon" aria-label="Ver participantes">
+                      👁
+                    </button>
                   </div>
                 </div>
+              </td>
+              <td><span :class="statusClass(c.status)">{{ statusLabel(c.status) }}</span></td>
+              <td class="cell-actions">
                 <Link :href="`/events/${event.id}/categories/${c.id}`" class="btn btn-ghost btn-sm">Abrir</Link>
                 <button
                   v-if="canManage && canDeleteCategory(c)"
@@ -340,7 +528,7 @@ function closePreview() {
               </td>
             </tr>
             <tr v-if="filteredCategories.length === 0">
-              <td colspan="8" class="hint table-empty">
+              <td colspan="7" class="hint table-empty">
                 {{ listSearch.trim() ? 'Sin coincidencias.' : 'Aún no hay categorías — crea la primera.' }}
               </td>
             </tr>
@@ -354,6 +542,28 @@ function closePreview() {
         </button>
       </div>
     </section>
+
+    <Teleport to="body">
+      <div
+        v-if="previewCategory && previewPosition"
+        class="category-preview-portal"
+        :style="{ top: `${previewPosition.top}px`, left: `${previewPosition.left}px` }"
+        @mouseenter="cancelClosePreview"
+        @mouseleave="scheduleClosePreview"
+      >
+        <p class="preview-title">{{ previewCategory.category_competitors_count }} inscritos</p>
+        <ul class="preview-list">
+          <li v-for="row in previewCategory.category_competitors" :key="row.id">
+            <strong>
+              {{ row.event_competitor.competitor.first_name }}
+              {{ row.event_competitor.competitor.last_name }}
+            </strong>
+            <span class="preview-meta">{{ competitorMeta(row) }}</span>
+          </li>
+          <li v-if="previewCategory.category_competitors.length === 0" class="hint">Sin inscritos aún.</li>
+        </ul>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -398,6 +608,119 @@ function closePreview() {
 .metric-tile--pending {
   border-color: #c084fc;
   background: #faf5ff;
+}
+
+.metric-tile--highlight {
+  border-color: #6366f1;
+  background: #eef2ff;
+  text-align: left;
+}
+
+.metric-tile--clickable {
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.metric-tile--clickable:hover:not(:disabled) {
+  border-color: #4f46e5;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+}
+
+.metric-tile--disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.metric-action {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.72rem;
+  color: #4338ca;
+  font-weight: 600;
+}
+
+.pending-categorization-card {
+  border-color: #c4b5fd;
+  background: linear-gradient(180deg, #faf5ff 0%, #fff 40%);
+}
+
+.pending-panel-header {
+  margin-bottom: 0.75rem;
+}
+
+.pending-summary {
+  margin-bottom: 1rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #ddd6fe;
+}
+
+.pending-summary-label {
+  display: block;
+  margin-bottom: 0.45rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #6d28d9;
+}
+
+.pending-summary-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.pending-summary-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.25rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  background: #ede9fe;
+  color: #5b21b6;
+}
+
+.pending-search-bar {
+  border-color: #7c3aed;
+}
+
+.pending-school {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  font-weight: 400;
+}
+
+.modality-chip {
+  display: inline-block;
+  margin: 0.12rem 0.25rem 0.12rem 0;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.modality-chip--enrolled {
+  background: #e2e8f0;
+  color: #334155;
+}
+
+.modality-chip--assigned {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.modality-chip--pending {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.pending-table td {
+  vertical-align: top;
 }
 
 .metric-label {
@@ -497,6 +820,24 @@ function closePreview() {
   gap: 0.25rem;
 }
 
+.competitors-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.competitors-count {
+  font-weight: 600;
+  font-size: 0.88rem;
+  white-space: nowrap;
+}
+
+.btn-icon {
+  padding: 0.15rem 0.35rem;
+  min-width: unset;
+  line-height: 1;
+}
+
 .btn-danger-text {
   color: #dc2626;
 }
@@ -543,21 +884,31 @@ function closePreview() {
   gap: 0.5rem;
 }
 
-.preview-wrap {
-  position: relative;
+.categories-list-card {
+  overflow: visible;
 }
 
-.category-preview {
-  position: absolute;
-  z-index: 20;
-  top: 115%;
-  left: 0;
-  width: 280px;
+.table-wrap {
+  overflow: visible;
+}
+
+.preview-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.category-preview-portal {
+  position: fixed;
+  z-index: 10050;
+  width: min(320px, calc(100vw - 24px));
+  max-height: min(70vh, 480px);
+  overflow-y: auto;
   background: #fff;
   border: 1px solid var(--color-border);
   border-radius: 8px;
-  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
-  padding: 0.55rem 0.6rem;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.22);
+  padding: 0.65rem 0.75rem;
+  pointer-events: auto;
 }
 
 .preview-title {

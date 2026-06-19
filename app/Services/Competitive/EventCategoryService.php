@@ -2,10 +2,14 @@
 
 namespace App\Services\Competitive;
 
+use App\Enums\AuditSeverity;
 use App\Enums\CategoryGenderScope;
 use App\Enums\EventCategoryStatus;
 use App\Enums\Gender;
+use App\Enums\MatchStatus;
+use App\Enums\MatchType;
 use App\Enums\ParticipantEnrollmentStatus;
+use App\Enums\UserRole;
 use App\Models\CategoryCompetitor;
 use App\Models\CategoryMatch;
 use App\Models\Event;
@@ -15,7 +19,8 @@ use App\Models\EventModality;
 use App\Models\Ring;
 use App\Models\User;
 use App\Services\Audit\AuditService;
-use App\Enums\AuditSeverity;
+use App\Services\Events\RegistrationCoverageService;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -23,6 +28,7 @@ class EventCategoryService
 {
     public function __construct(
         private readonly AuditService $audit,
+        private readonly RegistrationCoverageService $registrationCoverage,
     ) {}
 
     /**
@@ -72,13 +78,11 @@ class EventCategoryService
 
             $event = $category->event;
             $this->assertModalityEnabledForEvent($event, (int) $data['modality_id']);
-            $this->assertRingBelongsToEvent($event, $data['ring_id'] ?? null);
 
             $category->update([
                 'name' => $data['name'],
                 'modality_id' => $data['modality_id'],
                 'gender_scope' => $data['gender_scope'] ?? $category->gender_scope,
-                'ring_id' => $data['ring_id'] ?? null,
                 'competition_order' => $data['competition_order'] ?? $category->competition_order,
                 'notes' => $data['notes'] ?? null,
                 'reference_age' => $data['reference_age'] ?? null,
@@ -99,11 +103,18 @@ class EventCategoryService
         });
     }
 
-    public function updateStatus(EventCategory $category, EventCategoryStatus $status, User $actor): EventCategory
+    public function updateStatus(EventCategory $category, EventCategoryStatus $status, User $actor, bool $confirmed = false): EventCategory
     {
-        return DB::transaction(function () use ($category, $status, $actor) {
+        return DB::transaction(function () use ($category, $status, $actor, $confirmed) {
             $before = $category->status;
-            $this->assertTransition($category, $status);
+            $this->assertTransition($category, $status, $confirmed);
+
+            if ($before === EventCategoryStatus::BracketPending && $status === EventCategoryStatus::Draft) {
+                CategoryMatch::query()
+                    ->where('event_category_id', $category->id)
+                    ->delete();
+            }
+
             $category->update(['status' => $status]);
 
             $this->audit->record(
@@ -178,11 +189,16 @@ class EventCategoryService
         });
     }
 
-    public function assignCompetitor(EventCategory $category, EventCompetitor $participant, User $actor): CategoryCompetitor
-    {
-        return DB::transaction(function () use ($category, $participant, $actor) {
+    public function assignCompetitor(
+        EventCategory $category,
+        EventCompetitor $participant,
+        User $actor,
+        bool $adminOverride = false,
+    ): CategoryCompetitor {
+        return DB::transaction(function () use ($category, $participant, $actor, $adminOverride) {
             $this->assertCanEditRoster($category);
             $this->assertParticipantEligible($category, $participant);
+            $this->assertParticipantRegisteredForModality($category, $participant);
 
             $exists = CategoryCompetitor::query()
                 ->where('event_category_id', $category->id)
@@ -195,6 +211,19 @@ class EventCategoryService
                 ]);
             }
 
+            $conflict = $this->findModalityCategoryConflict($category, $participant);
+
+            if ($conflict !== null) {
+                $modalityName = $category->modality?->name ?? 'esta modalidad';
+
+                if (! $adminOverride || ! $this->isAdmin($actor)) {
+                    throw ValidationException::withMessages([
+                        'modality_conflict' => "Este participante ya pertenece a otra categoría de la modalidad {$modalityName}.",
+                        'existing_category_name' => $conflict->eventCategory->name,
+                    ]);
+                }
+            }
+
             $nextOrder = (int) CategoryCompetitor::query()
                 ->where('event_category_id', $category->id)
                 ->max('sort_order') + 1;
@@ -203,6 +232,7 @@ class EventCategoryService
                 'event_category_id' => $category->id,
                 'event_competitor_id' => $participant->id,
                 'sort_order' => $nextOrder,
+                'admin_override' => $conflict !== null && $adminOverride && $this->isAdmin($actor),
             ]);
 
             $participant->load('competitor:id,first_name,last_name');
@@ -214,7 +244,11 @@ class EventCategoryService
                 entityType: 'event_category',
                 entityId: $category->id,
                 summary: "Competidor asignado a {$category->internal_code}",
-                payloadAfter: ['event_competitor_id' => $participant->id],
+                payloadAfter: [
+                    'event_competitor_id' => $participant->id,
+                    'admin_override' => $assignment->admin_override,
+                    'conflict_category_id' => $conflict?->event_category_id,
+                ],
             );
 
             return $assignment;
@@ -237,9 +271,25 @@ class EventCategoryService
                 ->where('event_category_id', $categoryId)
                 ->where(function ($query) use ($participantId) {
                     $query->where('red_event_competitor_id', $participantId)
-                        ->orWhere('blue_event_competitor_id', $participantId);
+                        ->orWhere('blue_event_competitor_id', $participantId)
+                        ->orWhere('winner_id', $participantId);
                 })
-                ->delete();
+                ->get()
+                ->each(function (CategoryMatch $match) use ($participantId) {
+                    $updates = [];
+                    if ((int) $match->red_event_competitor_id === $participantId) {
+                        $updates['red_event_competitor_id'] = null;
+                    }
+                    if ((int) $match->blue_event_competitor_id === $participantId) {
+                        $updates['blue_event_competitor_id'] = null;
+                    }
+                    if ((int) $match->winner_id === $participantId) {
+                        $updates['winner_id'] = null;
+                    }
+                    if ($updates !== []) {
+                        $match->update($updates);
+                    }
+                });
 
             $this->audit->record(
                 actor: $actor,
@@ -301,11 +351,18 @@ class EventCategoryService
                 ->max('bout_order') + 1;
 
             $match = CategoryMatch::query()->create([
+                'event_id' => $category->event_id,
                 'event_category_id' => $category->id,
+                'match_code' => app(BracketService::class)->matchCodeFor($category, $nextOrder),
                 'red_event_competitor_id' => $redParticipantId,
                 'blue_event_competitor_id' => $blueParticipantId,
                 'bout_order' => $nextOrder,
                 'stage_label' => $stageLabel !== '' ? $stageLabel : 'R1',
+                'round_number' => 1,
+                'match_type' => ($redParticipantId !== null && $blueParticipantId !== null)
+                    ? MatchType::Normal
+                    : MatchType::Bye,
+                'status' => MatchStatus::Pending,
             ]);
 
             $this->audit->record(
@@ -350,9 +407,7 @@ class EventCategoryService
 
     /**
      * @param  list<array{
-     *   id?: int|null,
-     *   bout_order: int,
-     *   stage_label?: string|null,
+     *   id: int,
      *   red_event_competitor_id?: int|null,
      *   blue_event_competitor_id?: int|null
      * }>  $rows
@@ -366,18 +421,39 @@ class EventCategoryService
                 ]);
             }
 
+            $existing = CategoryMatch::query()
+                ->where('event_category_id', $category->id)
+                ->get()
+                ->keyBy('id');
+
+            if ($existing->isEmpty()) {
+                throw ValidationException::withMessages([
+                    'rows' => 'Genera la estructura de llave antes de asignar participantes.',
+                ]);
+            }
+
             $allowedIds = CategoryCompetitor::query()
                 ->where('event_category_id', $category->id)
                 ->pluck('event_competitor_id');
 
-            $used = collect();
-            foreach ($rows as $row) {
-                $red = isset($row['red_event_competitor_id']) ? (int) $row['red_event_competitor_id'] : null;
-                $blue = isset($row['blue_event_competitor_id']) ? (int) $row['blue_event_competitor_id'] : null;
+            $usedInInitialRound = collect();
 
-                if ($red === null && $blue === null) {
-                    continue;
+            foreach ($rows as $row) {
+                $id = (int) ($row['id'] ?? 0);
+                if (! $existing->has($id)) {
+                    throw ValidationException::withMessages([
+                        'rows' => 'Hay encuentros inválidos en la solicitud.',
+                    ]);
                 }
+
+                /** @var CategoryMatch $match */
+                $match = $existing[$id];
+                $red = array_key_exists('red_event_competitor_id', $row)
+                    ? ($row['red_event_competitor_id'] !== null ? (int) $row['red_event_competitor_id'] : null)
+                    : $match->red_event_competitor_id;
+                $blue = array_key_exists('blue_event_competitor_id', $row)
+                    ? ($row['blue_event_competitor_id'] !== null ? (int) $row['blue_event_competitor_id'] : null)
+                    : $match->blue_event_competitor_id;
 
                 foreach ([$red, $blue] as $pid) {
                     if ($pid === null) {
@@ -392,51 +468,40 @@ class EventCategoryService
                     if ($participant !== null) {
                         $this->assertParticipantEligible($category, $participant);
                     }
-                    if ($used->contains($pid)) {
-                        throw ValidationException::withMessages([
-                            'rows' => 'Un competidor no puede aparecer dos veces en la llave.',
-                        ]);
+                }
+
+                if ($match->round_number === 1 && $match->match_type !== MatchType::Final) {
+                    foreach ([$red, $blue] as $pid) {
+                        if ($pid === null) {
+                            continue;
+                        }
+                        if ($usedInInitialRound->contains($pid)) {
+                            throw ValidationException::withMessages([
+                                'rows' => 'Un competidor no puede aparecer dos veces en la primera ronda.',
+                            ]);
+                        }
+                        $usedInInitialRound->push($pid);
                     }
-                    $used->push($pid);
-                }
-            }
-
-            $current = CategoryMatch::query()
-                ->where('event_category_id', $category->id)
-                ->get()
-                ->keyBy('id');
-
-            $keepIds = collect();
-            foreach ($rows as $idx => $row) {
-                $red = isset($row['red_event_competitor_id']) ? (int) $row['red_event_competitor_id'] : null;
-                $blue = isset($row['blue_event_competitor_id']) ? (int) $row['blue_event_competitor_id'] : null;
-                if ($red === null && $blue === null) {
-                    continue;
                 }
 
-                $payload = [
-                    'event_category_id' => $category->id,
+                $matchType = $match->match_type;
+                if (in_array($matchType, [MatchType::Normal, MatchType::Bye], true)) {
+                    $matchType = ($red !== null && $blue !== null)
+                        ? MatchType::Normal
+                        : (($red !== null || $blue !== null) ? MatchType::Bye : MatchType::Normal);
+                }
+
+                $match->update([
                     'red_event_competitor_id' => $red,
                     'blue_event_competitor_id' => $blue,
-                    'bout_order' => (int) ($row['bout_order'] ?? ($idx + 1)),
-                    'stage_label' => (string) ($row['stage_label'] ?? 'R1'),
-                ];
-
-                $id = isset($row['id']) ? (int) $row['id'] : null;
-                if ($id !== null && $current->has($id)) {
-                    $current[$id]->update($payload);
-                    $keepIds->push($id);
-                    continue;
-                }
-
-                $match = CategoryMatch::query()->create($payload);
-                $keepIds->push($match->id);
+                    'match_type' => $matchType,
+                    'winner_id' => $matchType === MatchType::Bye
+                        ? ($red ?? $blue)
+                        : null,
+                ]);
             }
 
-            CategoryMatch::query()
-                ->where('event_category_id', $category->id)
-                ->when($keepIds->isNotEmpty(), fn ($q) => $q->whereNotIn('id', $keepIds))
-                ->delete();
+            app(BracketService::class)->propagateByeWinnersForCategory($category);
 
             $this->audit->record(
                 actor: $actor,
@@ -444,7 +509,7 @@ class EventCategoryService
                 severity: AuditSeverity::Info,
                 entityType: 'event_category',
                 entityId: $category->id,
-                summary: "Llave manual sincronizada ({$keepIds->count()} combates)",
+                summary: "Llave actualizada ({$existing->count()} encuentros)",
             );
         });
     }
@@ -532,7 +597,7 @@ class EventCategoryService
         }
     }
 
-    private function assertTransition(EventCategory $category, EventCategoryStatus $next): void
+    private function assertTransition(EventCategory $category, EventCategoryStatus $next, bool $confirmed = false): void
     {
         $current = $category->status;
 
@@ -540,30 +605,31 @@ class EventCategoryService
             return;
         }
 
-        if ($current === EventCategoryStatus::Draft && $next === EventCategoryStatus::BracketPending) {
-            $competitorCount = CategoryCompetitor::query()
-                ->where('event_category_id', $category->id)
-                ->count();
-            if ($competitorCount < 2) {
+        if ($current === EventCategoryStatus::BracketPending && $next === EventCategoryStatus::Draft) {
+            if (! $confirmed) {
                 throw ValidationException::withMessages([
-                    'status' => 'Necesitas al menos 2 competidores para poder pasar a armar las llaves.',
+                    'confirmation' => 'Esta acción eliminará todos los encuentros y la estructura de la llave. ¿Desea continuar?',
                 ]);
             }
 
             return;
         }
 
-        if ($current === EventCategoryStatus::BracketPending && $next === EventCategoryStatus::Draft) {
+        if ($current === EventCategoryStatus::Ready && $next === EventCategoryStatus::BracketPending) {
             return;
         }
 
         if ($current === EventCategoryStatus::BracketPending && $next === EventCategoryStatus::Ready) {
-            if (! $this->hasValidManualBracket($category)) {
+            if (! $this->hasValidBracketForReady($category)) {
                 throw ValidationException::withMessages([
-                    'status' => 'No puedes pasar a ready sin una llave manual válida.',
+                    'status' => 'No puedes mover a lista: los encuentros iniciales deben tener dos competidores o un competidor con bye.',
                 ]);
             }
 
+            return;
+        }
+
+        if ($current === EventCategoryStatus::Assigned && $next === EventCategoryStatus::Ready) {
             return;
         }
 
@@ -594,40 +660,67 @@ class EventCategoryService
         ]);
     }
 
-    private function hasValidManualBracket(EventCategory $category): bool
+    private function hasValidBracketForReady(EventCategory $category): bool
     {
-        $assignedCount = CategoryCompetitor::query()
-            ->where('event_category_id', $category->id)
-            ->count();
-
-        if ($assignedCount < 2) {
-            return false;
-        }
-
         $matches = CategoryMatch::query()
             ->where('event_category_id', $category->id)
-            ->get(['red_event_competitor_id', 'blue_event_competitor_id']);
+            ->orderBy('round_number')
+            ->orderBy('bout_order')
+            ->get();
 
         if ($matches->isEmpty()) {
             return false;
         }
 
-        $covered = collect();
-        foreach ($matches as $match) {
-            if ($match->red_event_competitor_id !== null) {
-                $covered->push((int) $match->red_event_competitor_id);
+        if ($matches->count() === 1 && $matches->first()->match_type === MatchType::Final) {
+            $match = $matches->first();
+
+            return $match->hasBothCompetitors();
+        }
+
+        $initialMatches = $matches->filter(function (CategoryMatch $match) {
+            if ($match->match_type === MatchType::Final) {
+                return false;
             }
-            if ($match->blue_event_competitor_id !== null) {
-                $covered->push((int) $match->blue_event_competitor_id);
+            if ($match->match_type === MatchType::ThirdPlace) {
+                return false;
+            }
+
+            return $match->round_number === 1;
+        });
+
+        if ($initialMatches->isEmpty()) {
+            return false;
+        }
+
+        foreach ($initialMatches as $match) {
+            if (! $this->isInitialMatchReady($match)) {
+                return false;
             }
         }
 
-        $covered = $covered->unique();
-        $assignedIds = CategoryCompetitor::query()
-            ->where('event_category_id', $category->id)
-            ->pluck('event_competitor_id');
+        return true;
+    }
 
-        return $assignedIds->diff($covered)->isEmpty();
+    private function isInitialMatchReady(CategoryMatch $match): bool
+    {
+        if ($match->hasBothCompetitors()) {
+            return true;
+        }
+
+        if ($match->hasExactlyOneCompetitor()) {
+            return true;
+        }
+
+        if (
+            $match->match_type === MatchType::Bye
+            && $match->red_event_competitor_id === null
+            && $match->blue_event_competitor_id === null
+        ) {
+            return true;
+        }
+
+        return false;
     }
 
     private function assertParticipantEligible(EventCategory $category, EventCompetitor $participant): void
@@ -670,7 +763,7 @@ class EventCategoryService
     }
 
     /**
-     * @param  \Illuminate\Database\Eloquent\Builder<\App\Models\EventCompetitor>  $query
+     * @param  Builder<EventCompetitor>  $query
      */
     public static function applyGenderScopeToCompetitorsQuery($query, CategoryGenderScope $scope): void
     {
@@ -679,5 +772,47 @@ class EventCategoryService
             CategoryGenderScope::Female => $query->whereHas('competitor', fn ($q) => $q->where('gender', Gender::Female)),
             CategoryGenderScope::Mixed => $query->whereHas('competitor', fn ($q) => $q->whereIn('gender', [Gender::Male->value, Gender::Female->value])),
         };
+    }
+
+    public static function eventModalityIdForCategory(EventCategory $category): ?int
+    {
+        return EventModality::query()
+            ->where('event_id', $category->event_id)
+            ->where('modality_id', $category->modality_id)
+            ->value('id');
+    }
+
+    private function assertParticipantRegisteredForModality(EventCategory $category, EventCompetitor $participant): void
+    {
+        $eventModalityId = self::eventModalityIdForCategory($category);
+
+        if ($eventModalityId === null) {
+            throw ValidationException::withMessages([
+                'event_competitor_id' => 'La modalidad de esta categoría no está habilitada en el evento.',
+            ]);
+        }
+
+        if (! $this->registrationCoverage->isRegisteredForEventModality($participant, $eventModalityId)) {
+            throw ValidationException::withMessages([
+                'event_competitor_id' => 'El participante no está inscrito en la modalidad requerida para esta categoría.',
+            ]);
+        }
+    }
+
+    private function findModalityCategoryConflict(EventCategory $category, EventCompetitor $participant): ?CategoryCompetitor
+    {
+        return CategoryCompetitor::query()
+            ->where('event_competitor_id', $participant->id)
+            ->whereHas('eventCategory', fn (Builder $q) => $q
+                ->where('event_id', $category->event_id)
+                ->where('modality_id', $category->modality_id)
+                ->whereKeyNot($category->id))
+            ->with('eventCategory:id,name,modality_id')
+            ->first();
+    }
+
+    private function isAdmin(User $actor): bool
+    {
+        return $actor->role === UserRole::Admin;
     }
 }

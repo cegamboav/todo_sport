@@ -59,6 +59,9 @@ class EventCategory extends Model
 
     public function matches(): HasMany
     {
-        return $this->hasMany(CategoryMatch::class)->orderBy('bout_order')->orderBy('id');
+        return $this->hasMany(CategoryMatch::class)
+            ->orderBy('round_number')
+            ->orderBy('bout_order')
+            ->orderBy('id');
     }
 }

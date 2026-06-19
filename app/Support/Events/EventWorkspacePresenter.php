@@ -4,21 +4,28 @@ namespace App\Support\Events;
 
 use App\Enums\CategoryGenderScope;
 use App\Enums\EventCategoryStatus;
-use App\Enums\Gender;
 use App\Enums\EventStatus;
+use App\Enums\Gender;
+use App\Enums\MasterStatus;
+use App\Enums\MatchType;
 use App\Enums\ParticipantEnrollmentStatus;
 use App\Enums\RegistrationItemStatus;
 use App\Enums\ThirdPlaceMode;
 use App\Enums\UserRole;
-use App\Enums\MasterStatus;
+use App\Models\CategoryCompetitor;
 use App\Models\Competitor;
 use App\Models\Event;
+use App\Models\EventCategory;
 use App\Models\EventCompetitor;
+use App\Models\EventModality;
 use App\Services\Auth\AdminAccessService;
 use App\Services\Competitive\EventCategoryService;
+use App\Services\Competitive\ParticipantCategoryAssignmentService;
 use App\Services\Events\EventService;
+use App\Services\Events\RegistrationCoverageService;
 use App\Services\Masters\CompetitorService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Schema;
 
 class EventWorkspacePresenter
@@ -27,6 +34,7 @@ class EventWorkspacePresenter
         private readonly EventService $events,
         private readonly AdminAccessService $access,
         private readonly CompetitorService $competitors,
+        private readonly ParticipantCategoryAssignmentService $categoryAssignments,
     ) {}
 
     /**
@@ -165,13 +173,14 @@ class EventWorkspacePresenter
                 'draft' => $categories->where('status', EventCategoryStatus::Draft)->count(),
                 'bracket_pending' => $categories->where('status', EventCategoryStatus::BracketPending)->count(),
             ],
+            'pendingCategorization' => $this->categoryAssignments->pendingCategorizationReport($event),
         ]);
     }
 
     /**
      * @return array<string, mixed>
      */
-    public function categoryShow(Request $request, Event $event, \App\Models\EventCategory $category): array
+    public function categoryShow(Request $request, Event $event, EventCategory $category): array
     {
         $shared = $this->shared($request, $event);
 
@@ -186,11 +195,26 @@ class EventWorkspacePresenter
         ]);
 
         $assignedIds = $category->categoryCompetitors->pluck('event_competitor_id');
+        $eventModalityId = EventCategoryService::eventModalityIdForCategory($category);
+
+        $conflictAssignments = CategoryCompetitor::query()
+            ->whereHas('eventCategory', fn ($q) => $q
+                ->where('event_id', $event->id)
+                ->where('modality_id', $category->modality_id)
+                ->whereKeyNot($category->id))
+            ->with('eventCategory:id,name')
+            ->get()
+            ->keyBy('event_competitor_id');
 
         $eligibleQuery = EventCompetitor::query()
             ->where('event_id', $event->id)
             ->where('status', ParticipantEnrollmentStatus::Active)
-            ->when($assignedIds->isNotEmpty(), fn ($q) => $q->whereNotIn('id', $assignedIds));
+            ->when($assignedIds->isNotEmpty(), fn ($q) => $q->whereNotIn('id', $assignedIds))
+            ->when(
+                $eventModalityId !== null,
+                fn ($q) => RegistrationCoverageService::scopeRegisteredForEventModality($q, $eventModalityId),
+                fn ($q) => $q->whereRaw('0 = 1'),
+            );
 
         EventCategoryService::applyGenderScopeToCompetitorsQuery($eligibleQuery, $category->gender_scope);
 
@@ -204,6 +228,23 @@ class EventWorkspacePresenter
             ->sortBy(fn (EventCompetitor $participant) => strtolower(
                 ($participant->competitor->last_name ?? '').' '.($participant->competitor->first_name ?? ''),
             ))
+            ->values()
+            ->map(function (EventCompetitor $participant) use ($conflictAssignments) {
+                $conflict = $conflictAssignments->get($participant->id);
+
+                return [
+                    'id' => $participant->id,
+                    'competitor' => $participant->competitor,
+                    'existing_category_name' => $conflict?->eventCategory->name,
+                ];
+            });
+
+        $availableParticipants = $eligibleParticipants
+            ->filter(fn (array $row) => $row['existing_category_name'] === null)
+            ->values();
+
+        $assignedElsewhereParticipants = $eligibleParticipants
+            ->filter(fn (array $row) => $row['existing_category_name'] !== null)
             ->values();
 
         $categoryCompetitorsForBuilder = $category->categoryCompetitors
@@ -212,12 +253,25 @@ class EventWorkspacePresenter
 
         return array_merge($shared, [
             'category' => $category,
-            'eligibleParticipants' => $eligibleParticipants,
+            'eligibleParticipants' => $availableParticipants,
+            'assignedElsewhereParticipants' => $assignedElsewhereParticipants,
             'categoryCompetitorsForBuilder' => $categoryCompetitorsForBuilder,
             'rings' => $event->rings()->orderBy('name')->get(['id', 'name']),
             'categoryStatusOptions' => $this->categoryStatusOptions(),
             'categoryGenderOptions' => $this->categoryGenderOptions(),
+            'matchTypeOptions' => $this->matchTypeOptions(),
         ]);
+    }
+
+    /**
+     * @return Collection<int, array{value: string, label: string}>
+     */
+    private function matchTypeOptions()
+    {
+        return collect(MatchType::cases())->map(fn (MatchType $type) => [
+            'value' => $type->value,
+            'label' => $type->label(),
+        ])->values();
     }
 
     /**
@@ -238,15 +292,20 @@ class EventWorkspacePresenter
                 'draft' => 0,
                 'bracket_pending' => 0,
             ],
+            'pendingCategorization' => [
+                'total_with_pending' => 0,
+                'summary_by_modality' => [],
+                'participants' => [],
+            ],
         ];
     }
 
     /**
-     * @return \Illuminate\Support\Collection<int, array{value: string, label: string}>
+     * @return Collection<int, array{value: string, label: string}>
      */
     private function categoryGenderOptions()
     {
-        return collect(\App\Enums\CategoryGenderScope::cases())->map(fn (\App\Enums\CategoryGenderScope $gender) => [
+        return collect(CategoryGenderScope::cases())->map(fn (CategoryGenderScope $gender) => [
             'value' => $gender->value,
             'label' => $gender->label(),
         ])->values();
